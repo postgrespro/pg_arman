@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "utils/file.h"
 #include "utils/configuration.h"
@@ -1753,7 +1754,7 @@ catalog_get_timelines(InstanceState *instanceState, InstanceConfig *instance)
 	}
 
 	/* determine which WAL segments must be kept because of wal retention */
-	if (instance->wal_depth <= 0)
+	if (instance->wal_depth <= 0 && instance->wal_window <= 0)
 		return timelineinfos;
 
 	/*
@@ -1819,7 +1820,14 @@ catalog_get_timelines(InstanceState *instanceState, InstanceConfig *instance)
 	for (i = 0; i < parray_num(timelineinfos); i++)
 	{
 		int count = 0;
+		time_t days_threshold = current_time;
 		timelineInfo *tlinfo = parray_get(timelineinfos, i);
+
+		if (instance_config.wal_window > 0)
+		{
+		    days_threshold = current_time -
+		    (instance_config.wal_window * 60 * 60 * 24);
+		}
 
 		/*
 		 * Iterate backward on backups belonging to this timeline to find
@@ -1857,7 +1865,9 @@ catalog_get_timelines(InstanceState *instanceState, InstanceConfig *instance)
 
 				count++;
 
-				if (count == instance->wal_depth)
+				if (count >= instance->wal_depth &&
+					days_threshold >= backup->recovery_time)
+
 				{
 					elog(LOG, "On timeline %i WAL is protected from purge at %X/%X",
 						 tlinfo->tli,

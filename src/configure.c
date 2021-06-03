@@ -194,6 +194,11 @@ ConfigOption instance_options[] =
 		&instance_config.wal_depth, SOURCE_CMD, 0,
 		OPTION_RETENTION_GROUP, 0, option_get_value
 	},
+	{
+		'u', 231, "wal-window",
+		&instance_config.wal_window, SOURCE_CMD, 0,
+		OPTION_RETENTION_GROUP, 0, option_get_value
+	},
 	/* Compression options */
 	{
 		'f', 222, "compress-algorithm",
@@ -372,6 +377,7 @@ init_config(InstanceConfig *config, const char *instance_name)
 	config->retention_redundancy = RETENTION_REDUNDANCY_DEFAULT;
 	config->retention_window = RETENTION_WINDOW_DEFAULT;
 	config->wal_depth = 0;
+	config->wal_window = 0;
 
 	config->compress_alg = COMPRESS_ALG_DEFAULT;
 	config->compress_level = COMPRESS_LEVEL_DEFAULT;
@@ -547,6 +553,11 @@ readInstanceConfigFile(InstanceState *instanceState)
 		{
 			'u', 221, "wal-depth",
 			&instance->wal_depth, SOURCE_CMD, 0,
+			OPTION_RETENTION_GROUP, 0, option_get_value
+		},
+		{
+			'u', 231, "wal-window",
+			&instance->wal_window, SOURCE_CMD, 0,
 			OPTION_RETENTION_GROUP, 0, option_get_value
 		},
 		/* Compression options */

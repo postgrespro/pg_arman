@@ -397,6 +397,7 @@ typedef struct InstanceConfig
 	uint32		retention_redundancy;
 	uint32		retention_window;
 	uint32		wal_depth;
+	uint32		wal_window;
 
 	CompressAlg	compress_alg;
 	int			compress_level;
