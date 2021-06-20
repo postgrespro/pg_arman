@@ -57,7 +57,7 @@ do_add_instance(InstanceState *instanceState, InstanceConfig *instance)
 						 "(-D, --pgdata)");
 
 	/* Read system_identifier from PGDATA */
-	instance->system_identifier = get_system_identifier(instance->pgdata);
+	instance->system_identifier = get_system_identifier(instance->pgdata, XLOG_CONTROL_FILE, FIO_DB_HOST);
 	/* Starting from PostgreSQL 11 read WAL segment size from PGDATA */
 	instance->xlog_seg_size = get_xlog_seg_size(instance->pgdata);
 

@@ -84,6 +84,7 @@ extern const char  *PROGRAM_EMAIL;
 #define DATABASE_MAP			"database_map"
 #define HEADER_MAP  			"page_header_map"
 #define HEADER_MAP_TMP  		"page_header_map_tmp"
+#define XLOG_CONTROL_BAK_FILE		XLOG_CONTROL_FILE".pbk.bak"
 
 /* Timeout defaults */
 #define ARCHIVE_TIMEOUT_DEFAULT		300
@@ -1131,12 +1132,12 @@ extern XLogRecPtr get_next_record_lsn(const char *archivedir, XLogSegNo	segno, T
 extern TimeLineID get_current_timeline(PGconn *conn);
 extern TimeLineID get_current_timeline_from_control(bool safe);
 extern XLogRecPtr get_checkpoint_location(PGconn *conn);
-extern uint64 get_system_identifier(const char *pgdata_path);
+extern uint64 get_system_identifier(const char *pgdata_path, const char *pg_control_filename, fio_location location);
 extern uint64 get_remote_system_identifier(PGconn *conn);
 extern uint32 get_data_checksum_version(bool safe);
 extern pg_crc32c get_pgcontrol_checksum(const char *pgdata_path);
 extern uint32 get_xlog_seg_size(char *pgdata_path);
-extern void get_redo(const char *pgdata_path, RedoParams *redo);
+extern void get_redo(const char *pgdata_path, const char *pg_control_filename, RedoParams *redo);
 extern void set_min_recovery_point(pgFile *file, const char *backup_path,
 								   XLogRecPtr stop_backup_lsn);
 extern void copy_pgcontrol_file(const char *from_fullpath, fio_location from_location,

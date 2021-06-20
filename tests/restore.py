@@ -3858,7 +3858,7 @@ class RestoreTest(ProbackupTest, unittest.TestCase):
         node.cleanup()
 
         count = 0
-        filelist =  self.get_backup_filelist(backup_dir, 'node', backup_id)
+        filelist = self.get_backup_filelist(backup_dir, 'node', backup_id)
         for file in filelist:
             # count only nondata files
             if int(filelist[file]['is_datafile']) == 0 and int(filelist[file]['size']) > 0:
@@ -3895,6 +3895,11 @@ class RestoreTest(ProbackupTest, unittest.TestCase):
                 e.message,
                 '\n Unexpected Error Message: {0}\n CMD: {1}'.format(
                     repr(e.message), self.cmd))
+
+        with open(os.path.join(node.logs_dir, 'postgresql.log'), 'r') as f:
+            self.assertIn(
+                "PANIC:  could not read from control file: read 0 bytes",
+                f.read())
 
         # Clean after yourself
         self.del_test_dir(module_name, fname)

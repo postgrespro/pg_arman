@@ -148,7 +148,7 @@ do_archive_push(InstanceState *instanceState, InstanceConfig *instance, char *wa
 		elog(ERROR, "getcwd() error");
 
 	/* verify that archive-push --instance parameter is valid */
-	system_id = get_system_identifier(current_dir);
+	system_id = get_system_identifier(current_dir, XLOG_CONTROL_FILE, FIO_DB_HOST);
 
 	if (instance->pgdata == NULL)
 		elog(ERROR, "Cannot read pg_probackup.conf for this instance");

@@ -958,7 +958,7 @@ check_system_identifiers(PGconn *conn, char *pgdata)
 	uint64		system_id_conn;
 	uint64		system_id_pgdata;
 
-	system_id_pgdata = get_system_identifier(pgdata);
+	system_id_pgdata = get_system_identifier(pgdata, XLOG_CONTROL_FILE, FIO_DB_HOST);
 	system_id_conn = get_remote_system_identifier(conn);
 
 	/* for checkdb check only system_id_pgdata and system_id_conn */

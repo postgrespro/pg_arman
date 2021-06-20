@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import hashlib
 import shutil
 import json
-from testgres import QueryException
+from testgres import QueryException, StartNodeException
 
 
 module_name = 'incr_restore'
@@ -2436,3 +2436,82 @@ class IncrRestoreTest(ProbackupTest, unittest.TestCase):
         self.del_test_dir(module_name, fname)
 
 # check that MinRecPoint and BackupStartLsn are correctly used in case of --incrementa-lsn
+
+
+    # @unittest.skip("skip")
+    def test_incr_restore_issue_313(self):
+        """
+        Check that failed incremental restore can be restarted
+        """
+        fname = self.id().split('.')[3]
+
+        node = self.make_simple_node(
+            base_dir = os.path.join(module_name, fname, 'node'),
+            set_replication = True,
+            initdb_params = ['--data-checksums'])
+
+        backup_dir = os.path.join(self.tmp_path, module_name, fname, 'backup')
+        self.init_pb(backup_dir)
+        self.add_instance(backup_dir, 'node', node)
+        self.set_archiving(backup_dir, 'node', node)
+        node.slow_start()
+
+        node.pgbench_init(scale = 50)
+
+        full_backup_id = self.backup_node(backup_dir, 'node', node, backup_type='full')
+
+        pgbench = node.pgbench(
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            options=['-T', '10', '-c', '1', '--no-vacuum'])
+        pgbench.wait()
+        pgbench.stdout.close()
+
+        last_backup_id = self.backup_node(backup_dir, 'node', node, backup_type='delta')
+
+        pgdata = self.pgdata_content(node.data_dir)
+        node.cleanup()
+
+        self.restore_node(backup_dir, 'node', node, backup_id=full_backup_id)
+
+        count = 0
+        filelist = self.get_backup_filelist(backup_dir, 'node', last_backup_id)
+        for file in filelist:
+            # count only nondata files
+            if int(filelist[file]['is_datafile']) == 0 and int(filelist[file]['size']) > 0:
+                count += 1
+
+        gdb = self.restore_node(backup_dir, 'node', node, gdb=True,
+            backup_id=last_backup_id, options=['--progress', '--incremental-mode=checksum'])
+        gdb.verbose = False
+        gdb.set_breakpoint('restore_non_data_file')
+        gdb.run_until_break()
+        gdb.continue_execution_until_break(count - 2)
+        gdb.quit()
+
+        try:
+            node.slow_start()
+            # we should die here because exception is what we expect to happen
+            self.assertEqual(
+                1, 0,
+                "Expecting Error because backup is not fully restored")
+        except StartNodeException as e:
+            self.assertIn(
+                'Cannot start node',
+                e.message,
+                '\n Unexpected Error Message: {0}\n CMD: {1}'.format(
+                    repr(e.message), self.cmd))
+
+        with open(os.path.join(node.logs_dir, 'postgresql.log'), 'r') as f:
+            self.assertIn(
+                "postgres: could not find the database system",
+                f.read())
+
+        self.restore_node(backup_dir, 'node', node,
+            backup_id=last_backup_id, options=['--progress', '--incremental-mode=checksum'])
+        node.slow_start()
+
+        self.compare_pgdata(pgdata, self.pgdata_content(node.data_dir))
+
+        # Clean after yourself
+        node.stop()
+        self.del_test_dir(module_name, fname)

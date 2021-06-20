@@ -1606,11 +1606,11 @@ class ProbackupTest(object):
         files_to_ignore = [
             'postmaster.pid', 'postmaster.opts',
             'pg_internal.init', 'postgresql.auto.conf',
-            'backup_label', 'tablespace_map', 'recovery.conf',
-            'ptrack_control', 'ptrack_init', 'pg_control',
-            'probackup_recovery.conf', 'recovery.signal',
-            'standby.signal', 'ptrack.map', 'ptrack.map.mmap',
-            'ptrack.map.tmp'
+            'backup_label', 'backup_label.old', 'tablespace_map',
+            'recovery.conf', 'recovery.done', 'ptrack_control',
+            'ptrack_init', 'pg_control', 'probackup_recovery.conf',
+            'recovery.signal', 'standby.signal',
+            'ptrack.map', 'ptrack.map.mmap', 'ptrack.map.tmp'
         ]
 
         if exclude_dirs:

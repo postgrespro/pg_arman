@@ -3,7 +3,7 @@
  * restore.c: restore DB cluster and archived WAL.
  *
  * Portions Copyright (c) 2009-2013, NIPPON TELEGRAPH AND TELEPHONE CORPORATION
- * Portions Copyright (c) 2015-2019, Postgres Professional
+ * Portions Copyright (c) 2015-2021, Postgres Professional
  *
  *-------------------------------------------------------------------------
  */
@@ -61,6 +61,8 @@ static void create_recovery_conf(InstanceState *instanceState, time_t backup_id,
 								 pgBackup *backup,
 								 pgRestoreParams *params);
 static void *restore_files(void *arg);
+static size_t restore_file(pgFile *dest_file, const char *to_fullpath, bool already_exists, char *out_buf,
+	pgBackup *dest_backup, parray *parent_chain, bool use_bitmap, IncrRestoreMode incremental_mode, XLogRecPtr shift_lsn);
 static void set_orphan_status(parray *backups, pgBackup *parent_backup);
 
 static void restore_chain(pgBackup *dest_backup, parray *parent_chain,
@@ -487,7 +489,20 @@ do_restore_or_validate(InstanceState *instanceState, time_t target_backup_id, pg
 	{
 		RedoParams redo;
 		parray	  *timelines = NULL;
-		get_redo(instance_config.pgdata, &redo);
+
+		/* [Issue #313] check for previous failed incremental restore */
+		{
+			char    filename[MAXPGPATH];
+
+			join_path_components(filename, instance_config.pgdata, XLOG_CONTROL_BAK_FILE);
+			if (fio_access(filename, F_OK, FIO_DB_HOST) == 0)
+			{
+				elog(WARNING, "\"%s\" found, using incremental restore parameters from it", filename);
+				get_redo(instance_config.pgdata, XLOG_CONTROL_BAK_FILE, &redo);
+			}
+			else
+				get_redo(instance_config.pgdata, XLOG_CONTROL_FILE, &redo);
+		}
 
 		if (redo.checksum_version == 0)
 			elog(ERROR, "Incremental restore in 'lsn' mode require "
@@ -710,6 +725,9 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 	parray      *pgdata_files = NULL;
 	parray		*dest_files = NULL;
 	parray		*external_dirs = NULL;
+	pgFile	*dest_pg_control_file = NULL;
+	char	dest_pg_control_fullpath[MAXPGPATH];
+	char	dest_pg_control_bak_fullpath[MAXPGPATH];
 	/* arrays with meta info for multi threaded backup */
 	pthread_t  *threads;
 	restore_files_arg *threads_args;
@@ -790,12 +808,7 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 	 * unless we are running incremental-lsn restore, then bitmap is mandatory.
 	 */
 	if (use_bitmap && parray_num(parent_chain) == 1)
-	{
-		if (params->incremental_mode == INCR_NONE)
-			use_bitmap = false;
-		else
-			use_bitmap = true;
-	}
+		use_bitmap = params->incremental_mode != INCR_NONE;
 
 	/*
 	 * Restore dest_backup internal directories.
@@ -913,6 +926,11 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 				pg_strcasecmp(file->name, RELMAPPER_FILENAME) == 0)
 				redundant = true;
 
+			/* global/pg_control.pbk.bak are always keeped, because it's needed for restart failed incremental restore */
+			if (file->external_dir_num == 0 &&
+				pg_strcasecmp(file->rel_path, XLOG_CONTROL_BAK_FILE) == 0)
+				redundant = false;
+
 			/* do not delete the useful internal directories */
 			if (S_ISDIR(file->mode) && !redundant)
 				continue;
@@ -965,6 +983,37 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 		dest_bytes = dest_backup->pgdata_bytes;
 
 	pretty_size(dest_bytes, pretty_dest_bytes, lengthof(pretty_dest_bytes));
+
+	/*
+	 * [Issue #313]
+	 * find pg_control file (in already sorted earlier dest_files, see parray_qsort(backup->files...))
+	 * and exclude it from list for future special processing
+	 */
+	{
+		int control_file_elem_index;
+		pgFile search_key;
+		MemSet(&search_key, 0, sizeof(pgFile));
+		/* pgFileCompareRelPathWithExternal uses only .rel_path and .external_dir_num for comparision */
+		search_key.rel_path = XLOG_CONTROL_FILE;
+		search_key.external_dir_num = 0;
+		control_file_elem_index = parray_bsearch_index(dest_files, &search_key, pgFileCompareRelPathWithExternal);
+
+		if (control_file_elem_index < 0)
+			elog(ERROR, "File \"%s\" not found in backup %s", XLOG_CONTROL_FILE, base36enc(dest_backup->start_time));
+		dest_pg_control_file = parray_remove(dest_files, control_file_elem_index);
+
+		join_path_components(dest_pg_control_fullpath, pgdata_path, XLOG_CONTROL_FILE);
+		join_path_components(dest_pg_control_bak_fullpath, pgdata_path, XLOG_CONTROL_BAK_FILE);
+		/*
+		 * rename (if it exist) dest control file before restoring
+		 * if it doesn't exist, that mean, that we already restoring in a previously failed
+		 * pgdata, where XLOG_CONTROL_BAK_FILE exist
+		 */
+		if (params->incremental_mode != INCR_NONE
+			&& fio_access(dest_pg_control_fullpath, F_OK, FIO_DB_HOST) == 0)
+			fio_rename(dest_pg_control_fullpath, dest_pg_control_bak_fullpath, FIO_DB_HOST);
+	}
+
 	elog(INFO, "Start restoring backup files. PGDATA size: %s", pretty_dest_bytes);
 	time(&start_time);
 	thread_interrupted = false;
@@ -972,30 +1021,30 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 	/* Restore files into target directory */
 	for (i = 0; i < num_threads; i++)
 	{
-		restore_files_arg *arg = &(threads_args[i]);
-
-		arg->dest_files = dest_files;
-		arg->pgdata_files = pgdata_files;
-		arg->dest_backup = dest_backup;
-		arg->dest_external_dirs = external_dirs;
-		arg->parent_chain = parent_chain;
-		arg->dbOid_exclude_list = dbOid_exclude_list;
-		arg->skip_external_dirs = params->skip_external_dirs;
-		arg->to_root = pgdata_path;
-		arg->use_bitmap = use_bitmap;
-		arg->incremental_mode = params->incremental_mode;
-		arg->shift_lsn = params->shift_lsn;
-		threads_args[i].restored_bytes = 0;
-		/* By default there are some error */
-		threads_args[i].ret = 1;
+		threads_args[i] = (restore_files_arg){
+			.dest_files = dest_files,
+			.pgdata_files = pgdata_files,
+			.dest_backup = dest_backup,
+			.dest_external_dirs = external_dirs,
+			.parent_chain = parent_chain,
+			.dbOid_exclude_list = dbOid_exclude_list,
+			.skip_external_dirs = params->skip_external_dirs,
+			.to_root = pgdata_path,
+			.use_bitmap = use_bitmap,
+			.incremental_mode = params->incremental_mode,
+			.shift_lsn = params->shift_lsn,
+			.restored_bytes = 0,
+			/* By default there are some error */
+			.ret = 1,
+		};
 
 		/* Useless message TODO: rewrite */
 		elog(LOG, "Start thread %i", i + 1);
 
-		pthread_create(&threads[i], NULL, restore_files, arg);
+		pthread_create(&threads[i], NULL, restore_files, &(threads_args[i]));
 	}
 
-	/* Wait theads */
+	/* Wait threads */
 	for (i = 0; i < num_threads; i++)
 	{
 		pthread_join(threads[i], NULL);
@@ -1003,6 +1052,15 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 			restore_isok = false;
 
 		total_bytes += threads_args[i].restored_bytes;
+	}
+
+	/* [Issue #313] copy pg_control at very end */
+	if (restore_isok)
+	{
+		total_bytes += restore_file(dest_pg_control_file, dest_pg_control_fullpath, false, NULL,
+			dest_backup, parent_chain, use_bitmap, params->incremental_mode, params->shift_lsn);
+		if (params->incremental_mode != INCR_NONE)
+			fio_unlink(dest_pg_control_bak_fullpath, FIO_DB_HOST);
 	}
 
 	time(&end_time);
@@ -1070,6 +1128,10 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 				elog(ERROR, "Failed to sync file \"%s\": %s", to_fullpath, strerror(errno));
 		}
 
+		/* sync control file */
+		if (fio_sync(dest_pg_control_fullpath, FIO_DB_HOST) != 0)
+			elog(ERROR, "Failed to sync file \"%s\": %s", dest_pg_control_fullpath, strerror(errno));
+
 		time(&end_time);
 		pretty_time_interval(difftime(end_time, start_time),
 							 pretty_time, lengthof(pretty_time));
@@ -1089,6 +1151,8 @@ restore_chain(pgBackup *dest_backup, parray *parent_chain,
 		parray_free(pgdata_files);
 	}
 
+	pgFileFree(dest_pg_control_file);
+
 	for (i = parray_num(parent_chain) - 1; i >= 0; i--)
 	{
 		pgBackup   *backup = (pgBackup *) parray_get(parent_chain, i);
@@ -1107,7 +1171,6 @@ restore_files(void *arg)
 	int         i;
 	uint64      n_files;
 	char        to_fullpath[MAXPGPATH];
-	FILE       *out = NULL;
 	char       *out_buf = pgut_malloc(STDIO_BUFSIZE);
 
 	restore_files_arg *arguments = (restore_files_arg *) arg;
@@ -1117,9 +1180,6 @@ restore_files(void *arg)
 	for (i = 0; i < parray_num(arguments->dest_files); i++)
 	{
 		bool     already_exists = false;
-		PageState      *checksum_map = NULL; /* it should take ~1.5MB at most */
-		datapagemap_t  *lsn_map = NULL;      /* it should take 16kB at most */
-		char           *errmsg = NULL;       /* remote agent error message */
 		pgFile	*dest_file = (pgFile *) parray_get(arguments->dest_files, i);
 
 		/* Directories were created before */
@@ -1193,103 +1253,9 @@ restore_files(void *arg)
 			already_exists = true;
 		}
 
-		/*
-		 * Handle incremental restore case for data files.
-		 * If file is already exists in pgdata, then
-		 * we scan it block by block and get
-		 * array of checksums for every page.
-		 */
-		if (already_exists &&
-			dest_file->is_datafile && !dest_file->is_cfs &&
-			dest_file->n_blocks > 0)
-		{
-			if (arguments->incremental_mode == INCR_LSN)
-			{
-				lsn_map = fio_get_lsn_map(to_fullpath, arguments->dest_backup->checksum_version,
-								dest_file->n_blocks, arguments->shift_lsn,
-								dest_file->segno * RELSEG_SIZE, FIO_DB_HOST);
-			}
-			else if (arguments->incremental_mode == INCR_CHECKSUM)
-			{
-				checksum_map = fio_get_checksum_map(to_fullpath, arguments->dest_backup->checksum_version,
-													dest_file->n_blocks, arguments->dest_backup->stop_lsn,
-													dest_file->segno * RELSEG_SIZE, FIO_DB_HOST);
-			}
-		}
-
-		/*
-		 * Open dest file and truncate it to zero, if destination
-		 * file already exists and dest file size is zero, or
-		 * if file do not exist
-		 */
-		if ((already_exists && dest_file->write_size == 0) || !already_exists)
-			out = fio_fopen(to_fullpath, PG_BINARY_W, FIO_DB_HOST);
-		/*
-		 * If file already exists and dest size is not zero,
-		 * then open it for reading and writing.
-		 */
-		else
-			out = fio_fopen(to_fullpath, PG_BINARY_R "+", FIO_DB_HOST);
-
-		if (out == NULL)
-			elog(ERROR, "Cannot open restore target file \"%s\": %s",
-				 to_fullpath, strerror(errno));
-
-		/* update file permission */
-		if (fio_chmod(to_fullpath, dest_file->mode, FIO_DB_HOST) == -1)
-			elog(ERROR, "Cannot change mode of \"%s\": %s", to_fullpath,
-				 strerror(errno));
-
-		if (!dest_file->is_datafile || dest_file->is_cfs)
-			elog(VERBOSE, "Restoring nonedata file: \"%s\"", to_fullpath);
-		else
-			elog(VERBOSE, "Restoring data file: \"%s\"", to_fullpath);
-
-		// If destination file is 0 sized, then just close it and go for the next
-		if (dest_file->write_size == 0)
-			goto done;
-
-		/* Restore destination file */
-		if (dest_file->is_datafile && !dest_file->is_cfs)
-		{
-			/* enable stdio buffering for local destination data file */
-			if (!fio_is_remote_file(out))
-				setvbuf(out, out_buf, _IOFBF, STDIO_BUFSIZE);
-			/* Destination file is data file */
-			arguments->restored_bytes += restore_data_file(arguments->parent_chain,
-														   dest_file, out, to_fullpath,
-														   arguments->use_bitmap, checksum_map,
-														   arguments->shift_lsn, lsn_map, true);
-		}
-		else
-		{
-			/* disable stdio buffering for local destination nonedata file */
-			if (!fio_is_remote_file(out))
-				setvbuf(out, NULL, _IONBF, BUFSIZ);
-			/* Destination file is nonedata file */
-			arguments->restored_bytes += restore_non_data_file(arguments->parent_chain,
-										arguments->dest_backup, dest_file, out, to_fullpath,
-										already_exists);
-		}
-
-done:
-		/* Writing is asynchronous in case of restore in remote mode, so check the agent status */
-		if (fio_check_error_file(out, &errmsg))
-			elog(ERROR, "Cannot write to the remote file \"%s\": %s", to_fullpath, errmsg);
-
-		/* close file */
-		if (fio_fclose(out) != 0)
-			elog(ERROR, "Cannot close file \"%s\": %s", to_fullpath,
-				 strerror(errno));
-
-		/* free pagemap used for restore optimization */
-		pg_free(dest_file->pagemap.bitmap);
-
-		if (lsn_map)
-			pg_free(lsn_map->bitmap);
-
-		pg_free(lsn_map);
-		pg_free(checksum_map);
+		arguments->restored_bytes += restore_file(dest_file, to_fullpath, already_exists, out_buf,
+			arguments->dest_backup, arguments->parent_chain, arguments->use_bitmap,
+			arguments->incremental_mode, arguments->shift_lsn);
 	}
 
 	free(out_buf);
@@ -1301,6 +1267,120 @@ done:
 	arguments->ret = 0;
 
 	return NULL;
+}
+
+/*
+ * Restore one file into $PGDATA.
+ */
+static size_t
+restore_file(pgFile *dest_file, const char *to_fullpath, bool already_exists, char *out_buf,
+	pgBackup *dest_backup, parray *parent_chain, bool use_bitmap, IncrRestoreMode incremental_mode, XLogRecPtr shift_lsn)
+{
+	FILE       *out = NULL;
+	size_t		restored_bytes = 0;
+	PageState      *checksum_map = NULL; /* it should take ~1.5MB at most */
+	datapagemap_t  *lsn_map = NULL;      /* it should take 16kB at most */
+	char           *errmsg = NULL;       /* remote agent error message */
+
+	/*
+	 * Handle incremental restore case for data files.
+	 * If file is already exists in pgdata, then
+	 * we scan it block by block and get
+	 * array of checksums for every page.
+	 */
+	if (already_exists &&
+		dest_file->is_datafile && !dest_file->is_cfs &&
+		dest_file->n_blocks > 0)
+	{
+		if (incremental_mode == INCR_LSN)
+		{
+			lsn_map = fio_get_lsn_map(to_fullpath, dest_backup->checksum_version,
+							dest_file->n_blocks, shift_lsn,
+							dest_file->segno * RELSEG_SIZE, FIO_DB_HOST);
+		}
+		else if (incremental_mode == INCR_CHECKSUM)
+		{
+			checksum_map = fio_get_checksum_map(to_fullpath, dest_backup->checksum_version,
+												dest_file->n_blocks, dest_backup->stop_lsn,
+												dest_file->segno * RELSEG_SIZE, FIO_DB_HOST);
+		}
+	}
+
+	/*
+	 * Open dest file and truncate it to zero, if destination
+	 * file already exists and dest file size is zero, or
+	 * if file do not exist
+	 */
+	if ((already_exists && dest_file->write_size == 0) || !already_exists)
+		out = fio_fopen(to_fullpath, PG_BINARY_W, FIO_DB_HOST);
+	/*
+	 * If file already exists and dest size is not zero,
+	 * then open it for reading and writing.
+	 */
+	else
+		out = fio_fopen(to_fullpath, PG_BINARY_R "+", FIO_DB_HOST);
+
+	if (out == NULL)
+		elog(ERROR, "Cannot open restore target file \"%s\": %s",
+			 to_fullpath, strerror(errno));
+
+	/* update file permission */
+	if (fio_chmod(to_fullpath, dest_file->mode, FIO_DB_HOST) == -1)
+		elog(ERROR, "Cannot change mode of \"%s\": %s", to_fullpath,
+			 strerror(errno));
+
+	if (!dest_file->is_datafile || dest_file->is_cfs)
+		elog(VERBOSE, "Restoring nonedata file: \"%s\"", to_fullpath);
+	else
+		elog(VERBOSE, "Restoring data file: \"%s\"", to_fullpath);
+
+	// If destination file is 0 sized, then just close it and go for the next
+	if (dest_file->write_size != 0)
+	{
+		/* Restore destination file */
+		if (dest_file->is_datafile && !dest_file->is_cfs)
+		{
+			/* enable stdio buffering for local destination data file */
+			if (!fio_is_remote_file(out) && out_buf != NULL)
+				setvbuf(out, out_buf, _IOFBF, STDIO_BUFSIZE);
+			/* Destination file is data file */
+			restored_bytes += restore_data_file(parent_chain,
+														   dest_file, out, to_fullpath,
+														   use_bitmap, checksum_map,
+														   shift_lsn, lsn_map, true);
+		}
+		else
+		{
+			/* disable stdio buffering for local destination nonedata file */
+			if (!fio_is_remote_file(out))
+				setvbuf(out, NULL, _IONBF, BUFSIZ);
+			/* Destination file is nonedata file */
+			restored_bytes += restore_non_data_file(parent_chain,
+										dest_backup, dest_file, out, to_fullpath,
+										already_exists);
+		}
+	}
+
+	/* Writing is asynchronous in case of restore in remote mode, so check the agent status */
+	if (fio_check_error_file(out, &errmsg))
+		elog(ERROR, "Cannot write to the remote file \"%s\": %s", to_fullpath, errmsg);
+
+	/* close file */
+	if (fio_fclose(out) != 0)
+		elog(ERROR, "Cannot close file \"%s\": %s", to_fullpath,
+			 strerror(errno));
+
+	if (lsn_map)
+		pg_free(lsn_map->bitmap);
+
+	pg_free(lsn_map);
+	pg_free(checksum_map);
+
+	/* free pagemap used for restore optimization */
+	pg_free(dest_file->pagemap.bitmap);
+	dest_file->pagemap.bitmap = NULL;
+
+	return restored_bytes;
 }
 
 /*
@@ -2153,7 +2233,7 @@ check_incremental_compatibility(const char *pgdata, uint64 system_identifier,
 	bool    postmaster_is_up = false;
 	bool    backup_label_exists = false;
 	pid_t   pid;
-	char    backup_label[MAXPGPATH];
+	char    filename[MAXPGPATH];
 
 	/* check postmaster pid */
 	pid = fio_check_postmaster(pgdata, FIO_DB_HOST);
@@ -2188,7 +2268,12 @@ check_incremental_compatibility(const char *pgdata, uint64 system_identifier,
 	 */
 	elog(INFO, "Trying to read pg_control file in destination direstory");
 
-	system_id_pgdata = get_system_identifier(pgdata);
+	/* [Issue #313] check for previous failed incremental restore */
+	join_path_components(filename, instance_config.pgdata, XLOG_CONTROL_BAK_FILE);
+	if (fio_access(filename, F_OK, FIO_DB_HOST) == 0)
+		system_id_pgdata = get_system_identifier(pgdata, XLOG_CONTROL_BAK_FILE, FIO_DB_HOST);
+	else
+		system_id_pgdata = get_system_identifier(pgdata, XLOG_CONTROL_FILE, FIO_DB_HOST);
 
 	if (system_id_pgdata == instance_config.system_identifier)
 		system_id_match = true;
@@ -2203,8 +2288,8 @@ check_incremental_compatibility(const char *pgdata, uint64 system_identifier,
 	 */
 	if (incremental_mode == INCR_LSN)
 	{
-		join_path_components(backup_label, pgdata, "backup_label");
-		if (fio_access(backup_label, F_OK, FIO_DB_HOST) == 0)
+		join_path_components(filename, pgdata, PG_BACKUP_LABEL_FILE);
+		if (fio_access(filename, F_OK, FIO_DB_HOST) == 0)
 		{
 			elog(WARNING, "Destination directory contains \"backup_control\" file. "
 				"This does NOT mean that you should delete this file and retry, only that "
