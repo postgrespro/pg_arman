@@ -113,6 +113,165 @@ do_delete(time_t backup_id)
 	parray_free(backup_list);
 }
 
+void
+do_detach(time_t backup_id)
+{
+	int			i;
+	parray	   *backup_list,
+			   *delete_list;
+	pgBackup   *target_backup = NULL;
+	size_t		size_to_delete = 0;
+	char		size_to_delete_pretty[20];
+
+	/* Get complete list of backups */
+	backup_list = catalog_get_backup_list(instance_name, INVALID_BACKUP_ID);
+
+	delete_list = parray_new();
+
+	/* Find backup to be deleted and make increment backups array to be deleted */
+	for (i = 0; i < parray_num(backup_list); i++)
+	{
+		pgBackup   *backup = (pgBackup *) parray_get(backup_list, i);
+
+		if (backup->start_time == backup_id)
+		{
+			target_backup = backup;
+			break;
+		}
+	}
+
+	/* sanity */
+	if (!target_backup)
+		elog(ERROR, "Failed to find backup %s, cannot detach", base36enc(backup_id));
+
+	/* form delete list */
+	for (i = 0; i < parray_num(backup_list); i++)
+	{
+		pgBackup   *backup = (pgBackup *) parray_get(backup_list, i);
+
+		/* check if backup is descendant of delete target */
+		if (is_parent(target_backup->start_time, backup, true))
+		{
+			parray_append(delete_list, backup);
+
+			elog(LOG, "Backup %s %s be detached",
+				base36enc(backup->start_time), dry_run? "can":"will");
+
+			size_to_delete += backup->data_bytes;
+			if (backup->stream)
+				size_to_delete += backup->wal_bytes;
+		}
+	}
+
+	/* Report the resident size to delete */
+	if (size_to_delete >= 0)
+	{
+		pretty_size(size_to_delete, size_to_delete_pretty, lengthof(size_to_delete_pretty));
+		elog(INFO, "Resident data size to free by detach of backup %s : %s",
+			base36enc(target_backup->start_time), size_to_delete_pretty);
+	}
+
+	if (!dry_run)
+	{
+		/* Lock marked for delete backups */
+		catalog_lock_backup_list(delete_list, parray_num(delete_list) - 1, 0, false, true);
+
+		/* Delete backups from the end of list */
+		for (i = (int) parray_num(delete_list) - 1; i >= 0; i--)
+		{
+			pgBackup   *backup = (pgBackup *) parray_get(delete_list, (size_t) i);
+
+			if (interrupted)
+				elog(ERROR, "interrupted during detach backup");
+
+			detach_backup_files(backup);
+		}
+	}
+
+
+	/* cleanup */
+	parray_free(delete_list);
+	parray_walk(backup_list, pgBackupFree);
+	parray_free(backup_list);
+}
+
+/*
+* Detach backup files of the backup and update the status of the backup to
+* BACKUP_STATUS_DETACHED.
+* TODO: delete files on multiple threads
+*/
+void
+detach_backup_files(pgBackup *backup)
+{
+	size_t		i;
+	char		timestamp[100];
+	parray		*files;
+	size_t		num_files;
+	char		full_path[MAXPGPATH];
+
+	/*
+ 	 * If the backup was detached already, there is nothing to do.
+	 */
+	if (backup->status == BACKUP_STATUS_DETACHED)
+	{
+		elog(WARNING, "Backup %s already detached",
+			 base36enc(backup->start_time));
+		return;
+	}
+
+	if (backup->recovery_time)
+		time2iso(timestamp, lengthof(timestamp), backup->recovery_time, false);
+	else
+		time2iso(timestamp, lengthof(timestamp), backup->start_time, false);
+
+	elog(INFO, "Detach: %s %s",
+		 base36enc(backup->start_time), timestamp);
+        elog(INFO, "Backup paths:\n root_dir = %s\n database_dir = %s\n",
+                 backup->root_dir, backup->database_dir);
+
+
+	/*
+ 	 * Update STATUS to BACKUP_STATUS_DETACHING in preparation for the case which
+ 	 * the error occurs before deleting all backup files.
+ 	 */
+	write_backup_status(backup, BACKUP_STATUS_DETACHING, instance_name, false);
+        elog(INFO, "Set status in control file: DETACHING");
+
+	/* list files to be deleted */
+	files = parray_new();
+	dir_list_file(files, backup->database_dir, false, false, true, false, false, 0, FIO_BACKUP_HOST);
+
+	/* delete leaf node first */
+	parray_qsort(files, pgFileCompareRelPathWithExternalDesc);
+	num_files = parray_num(files);
+	for (i = 0; i < num_files; i++)
+	{
+		pgFile	   *file = (pgFile *) parray_get(files, i);
+
+		join_path_components(full_path, backup->database_dir, file->rel_path);
+
+		if (interrupted)
+			elog(ERROR, "interrupted during detach backup");
+
+		if (progress)
+			elog(INFO, "Progress: (%zd/%zd). Delete file \"%s\"",
+				 i + 1, num_files, full_path);
+
+		pgFileDelete(file->mode, full_path);
+	}
+
+	parray_walk(files, pgFileFree);
+	parray_free(files);
+	backup->status = BACKUP_STATUS_DETACHED;
+
+	/* Update STATUS to BACKUP_STATUS_DETACHED */
+	write_backup_status(backup, BACKUP_STATUS_DETACHED, instance_name, true);
+	elog(INFO, "Set status in control file: DETACHED");
+
+	return;
+}
+
+
 /*
  * Merge and purge backups by retention policy. Retention policy is configured by
  * retention_redundancy and retention_window variables.

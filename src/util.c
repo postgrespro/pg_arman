@@ -30,6 +30,8 @@ static const char *statusName[] =
 	"DELETED",
 	"DONE",
 	"ORPHAN",
+	"DETACHING",
+	"DETACHED",
 	"CORRUPT"
 };
 

@@ -39,6 +39,7 @@ typedef enum ProbackupSubcmd
 	RESTORE_CMD,
 	VALIDATE_CMD,
 	DELETE_CMD,
+        DETACH_CMD,
 	MERGE_CMD,
 	SHOW_CMD,
 	SET_CONFIG_CMD,
@@ -334,6 +335,8 @@ main(int argc, char *argv[])
 			backup_subcmd = VALIDATE_CMD;
 		else if (strcmp(argv[1], "delete") == 0)
 			backup_subcmd = DELETE_CMD;
+                else if (strcmp(argv[1], "detach") == 0)
+                        backup_subcmd = DETACH_CMD;
 		else if (strcmp(argv[1], "merge") == 0)
 			backup_subcmd = MERGE_CMD;
 		else if (strcmp(argv[1], "show") == 0)
@@ -405,6 +408,7 @@ main(int argc, char *argv[])
 		backup_subcmd == RESTORE_CMD ||
 		backup_subcmd == VALIDATE_CMD ||
 		backup_subcmd == DELETE_CMD ||
+		backup_subcmd == DETACH_CMD ||
 		backup_subcmd == MERGE_CMD ||
 		backup_subcmd == SET_CONFIG_CMD ||
 		backup_subcmd == SET_BACKUP_CMD)
@@ -663,6 +667,7 @@ main(int argc, char *argv[])
 		if (backup_subcmd != RESTORE_CMD &&
 			backup_subcmd != VALIDATE_CMD &&
 			backup_subcmd != DELETE_CMD &&
+			backup_subcmd != DETACH_CMD &&
 			backup_subcmd != MERGE_CMD &&
 			backup_subcmd != SET_BACKUP_CMD &&
 			backup_subcmd != SHOW_CMD)
@@ -850,6 +855,9 @@ main(int argc, char *argv[])
 			else
 					do_delete(current.backup_id);
 			break;
+                case DETACH_CMD:
+                        do_detach(current.backup_id);
+                        break;
 		case MERGE_CMD:
 			do_merge(current.backup_id, no_validate, no_sync);
 			break;

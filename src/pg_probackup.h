@@ -284,7 +284,9 @@ typedef enum BackupStatus
 	BACKUP_STATUS_DELETED,		/* data files have been deleted */
 	BACKUP_STATUS_DONE,			/* completed but not validated yet */
 	BACKUP_STATUS_ORPHAN,		/* backup validity is unknown but at least one parent backup is corrupted */
-	BACKUP_STATUS_CORRUPT		/* files are corrupted, not available */
+	BACKUP_STATUS_DETACHING,	/* data files are being detached */
+	BACKUP_STATUS_DETACHED,		/* data files have been detached */
+        BACKUP_STATUS_CORRUPT           /* files are corrupted, not available */
 } BackupStatus;
 
 typedef enum BackupMode
@@ -869,6 +871,8 @@ extern int do_show(const char *instance_name, time_t requested_backup_id, bool s
 /* in delete.c */
 extern void do_delete(time_t backup_id);
 extern void delete_backup_files(pgBackup *backup);
+extern void do_detach(time_t backup_id);
+extern void detach_backup_files(pgBackup *backup);
 extern void do_retention(bool no_validate, bool no_sync);
 extern int do_delete_instance(void);
 extern void do_delete_status(InstanceConfig *instance_config, const char *status);

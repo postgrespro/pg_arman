@@ -2623,6 +2623,10 @@ readBackupControlFile(const char *path)
 			backup->status = BACKUP_STATUS_DELETING;
 		else if (strcmp(status, "DELETED") == 0)
 			backup->status = BACKUP_STATUS_DELETED;
+                else if (strcmp(status, "DETACHING") == 0)
+                        backup->status = BACKUP_STATUS_DETACHING;
+                else if (strcmp(status, "DETACHED") == 0)
+                        backup->status = BACKUP_STATUS_DETACHED;
 		else if (strcmp(status, "DONE") == 0)
 			backup->status = BACKUP_STATUS_DONE;
 		else if (strcmp(status, "ORPHAN") == 0)

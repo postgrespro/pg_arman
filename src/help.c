@@ -15,6 +15,7 @@ static void help_restore(void);
 static void help_validate(void);
 static void help_show(void);
 static void help_delete(void);
+static void help_detach(void);
 static void help_merge(void);
 static void help_set_backup(void);
 static void help_set_config(void);
@@ -40,6 +41,8 @@ help_command(char *command)
 		help_show();
 	else if (strcmp(command, "delete") == 0)
 		help_delete();
+        else if (strcmp(command, "detach") == 0)
+                help_detach();
 	else if (strcmp(command, "merge") == 0)
 		help_merge();
 	else if (strcmp(command, "set-backup") == 0)
@@ -199,6 +202,11 @@ help_pg_probackup(void)
 	printf(_("                 [--delete-wal]\n"));
 	printf(_("                 [--dry-run] [--no-validate] [--no-sync]\n"));
 	printf(_("                 [--help]\n"));
+
+        printf(_("\n  %s detach -B backup-path --instance=instance_name\n"), PROGRAM_NAME);
+        printf(_("                 [-j num-threads] [--progress]\n"));
+        printf(_("                 [-i backup-id]\n"));
+        printf(_("                 [--help]\n"));
 
 	printf(_("\n  %s merge -B backup-path --instance=instance_name\n"), PROGRAM_NAME);
 	printf(_("                 -i backup-id [--progress] [-j num-threads]\n"));
@@ -678,6 +686,20 @@ help_delete(void)
 	printf(_("      --log-rotation-age=log-rotation-age\n"));
 	printf(_("                                   rotate logfile if its age exceeds this value; 0 disables; (default: 0)\n"));
 	printf(_("                                   available units: 'ms', 's', 'min', 'h', 'd' (default: min)\n\n"));
+}
+
+static void
+help_detach(void)
+{
+        printf(_("\n%s detach -B backup-path --instance=instance_name\n"), PROGRAM_NAME);
+        printf(_("                 [-j num-threads] [--progress]\n"));
+        printf(_("                 [-i backup-id ]\n\n"));
+
+        printf(_("  -B, --backup-path=backup-path    location of the backup storage area\n"));
+        printf(_("      --instance=instance_name     name of the instance\n"));
+        printf(_("  -i, --backup-id=backup-id        backup to detach\n"));
+        printf(_("  -j, --threads=NUM                number of parallel threads\n"));
+        printf(_("      --progress                   show progress\n\n"));
 }
 
 static void
